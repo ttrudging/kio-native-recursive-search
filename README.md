@@ -6,7 +6,7 @@ A downstream KDE Frameworks KIO patch that adds a native recursive filename sear
 
 - Native search field in the KFileWidget toolbar.
 - `Ctrl+F` focus shortcut.
-- 250 ms debounce.
+- 800 ms debounce (as implemented in v6 and v7).
 - Recursive search via the existing `filenamesearch:` KIO worker from `kio-extras`.
 - Searches from the current real folder.
 - Clearing search restores the original folder.
@@ -30,15 +30,16 @@ Modified source:
 src/filewidgets/kfilewidget.cpp
 ```
 
-Final local patch:
+Patch versions:
 
-```text
-~/Documents/kfile-search-patch/kfile-native-search-v6.patch
-```
+- `patches/kfilewidget-native-recursive-search.patch`: original tested v6, including temporary diagnostics.
+- `patches/kfilewidget-native-recursive-search-v7-clean.patch`: removes temporary focus logging without intentionally changing behavior. Structurally validated, but **not yet compiled or runtime-tested**.
+
+The original local v6 patch is at `~/Documents/kfile-search-patch/kfile-native-search-v6.patch`.
 
 ## Debian build
 
-Use a clean package rebuild:
+Apply the selected patch to the matching `kf6-kio-6.13.0` source tree before rebuilding. The commands below assume it has already been applied. Use a clean package rebuild:
 
 ```bash
 cd kf6-kio-6.13.0
