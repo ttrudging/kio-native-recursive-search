@@ -1,0 +1,48 @@
+--- src/filewidgets/kfilewidget.cpp.native-search-v3	2026-10-06 11:26:47.197533309 +0300
++++ src/filewidgets/kfilewidget.cpp	2026-10-06 11:45:25.351041667 +0300
+@@ -1293,6 +1293,11 @@
+ 
+     auto *searchEdit = new QLineEdit(m_toolbar);
+     searchEdit->setObjectName(QStringLiteral("KFileWidget::searchEdit"));
++
++    // Programmatic filenamesearch: navigation must not make
++    // KFileWidget::enterUrl() move focus to KDirOperator.
++    searchEdit->setProperty("_kfilePreserveFocusOnUrlChange", true);
++
+     searchEdit->setPlaceholderText(
+         i18nc("@info:placeholder", "Search in this folder"));
+     searchEdit->setClearButtonEnabled(true);
+@@ -1456,16 +1461,6 @@
+              */
+             m_ops->setUrl(searchUrl, false);
+ 
+-            // setUrl/urlEntered can disturb focus through the surrounding
+-            // KFileWidget machinery. Give it straight back to search.
+-            QTimer::singleShot(
+-                0,
+-                searchEdit,
+-                [searchEdit]() {
+-                    searchEdit->setFocus();
+-                    searchEdit->setCursorPosition(
+-                        searchEdit->text().size());
+-                });
+         };
+ 
+     q->connect(
+@@ -1947,7 +1942,15 @@
+     // because when the window is showing up m_locationEdit
+     // may still not have focus but it'll be the one that will have focus when the window
+     // gets it and we don't want to steal its focus either
+-    if (q->window()->focusWidget() != m_locationEdit) {
++    QWidget *focusWidget = q->window()->focusWidget();
++
++    const bool preserveCurrentFocus =
++        focusWidget
++        && focusWidget->property(
++               "_kfilePreserveFocusOnUrlChange").toBool();
++
++    if (focusWidget != m_locationEdit
++        && !preserveCurrentFocus) {
+         m_ops->setFocus();
+     }
+ }
