@@ -33,7 +33,7 @@ src/filewidgets/kfilewidget.cpp
 Patch versions:
 
 - `patches/kfilewidget-native-recursive-search.patch`: original tested v6, including temporary diagnostics.
-- `patches/kfilewidget-native-recursive-search-v7-clean.patch`: removes temporary focus logging without intentionally changing behavior. Structurally validated, but **not yet compiled or runtime-tested**.
+- `patches/kfilewidget-native-recursive-search-v7-clean.patch`: removes temporary focus logging without intentionally changing behavior. Clean-built and runtime-tested successfully on Debian 13 / KDE Plasma 6 on 2026-10-11. Confirmed by the maintainer to preserve recursive search and search-field focus.
 
 The original local v6 patch is at `~/Documents/kfile-search-patch/kfile-native-search-v6.patch`.
 
@@ -55,6 +55,18 @@ systemctl --user restart   plasma-xdg-desktop-portal-kde.service   xdg-desktop-p
 ```
 
 Do not use an incremental `-nc` rebuild while validating this patch; stale binaries caused misleading test results during development.
+
+## Confirmed Debian installation
+
+The cleaned v7 patch was built as `libkf6kiofilewidgets6 6.13.0-6+mbi1` and installed successfully on Debian 13. The KDE portal services were restarted, and recursive search was confirmed working with keyboard focus preserved.
+
+The local package is held to prevent normal APT upgrades from replacing the patched library:
+
+```bash
+sudo apt-mark hold libkf6kiofilewidgets6
+```
+
+A hold may block future KDE/KIO dependency upgrades. Rebase and rebuild the patch for newer upstream KIO versions before removing the hold.
 
 ## Packaging recommendation
 
