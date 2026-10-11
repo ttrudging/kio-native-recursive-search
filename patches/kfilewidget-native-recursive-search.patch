@@ -1,35 +1,389 @@
---- src/filewidgets/kfilewidget.cpp.native-search-v3	2026-10-06 11:26:47.197533309 +0300
-+++ src/filewidgets/kfilewidget.cpp	2026-10-06 11:45:25.351041667 +0300
-@@ -1293,6 +1293,11 @@
+--- a/src/filewidgets/kfilewidget.cpp
++++ b/src/filewidgets/kfilewidget.cpp
+@@ -74,6 +74,9 @@
+ #include <QStandardPaths>
+ #include <QTimer>
+ #include <QToolBar>
++#include <QRegularExpression>
++#include <QFile>
++#include <QUrlQuery>
  
-     auto *searchEdit = new QLineEdit(m_toolbar);
-     searchEdit->setObjectName(QStringLiteral("KFileWidget::searchEdit"));
+ #include <algorithm>
+ #include <array>
+@@ -1279,6 +1282,372 @@
+ 
+     m_toolbar->addWidget(midSpacer);
+ 
++    // Native recursive search for KFileWidget / KDE file dialogs.
++    //
++    // Interaction model:
++    //   - typing NEVER clears/reloads the view immediately
++    //   - search runs only after the user has stopped typing
++    //   - Enter searches immediately
++    //   - deleting characters searches the SHORTER current text
++    //   - empty text restores the original directory
++    //   - synthetic filenamesearch: URLs never enter navigation history
++
++    auto *searchEdit = new QLineEdit(m_toolbar);
++    searchEdit->setObjectName(QStringLiteral("KFileWidget::searchEdit"));
++
++    // Diagnostic proof that THIS KFileWidget build is running.
++    {
++        QFile traceFile(
++            QStandardPaths::writableLocation(QStandardPaths::HomeLocation)
++            + QStringLiteral("/kfile-focus.log"));
++
++        if (traceFile.open(QIODevice::WriteOnly
++                           | QIODevice::Append
++                           | QIODevice::Text)) {
++            traceFile.write("KFILE-TRACE-INIT\\n");
++            traceFile.flush();
++        }
++    }
++
++    // TEMPORARY diagnostic: tell us exactly who steals focus while
++    // the native search field contains text.
++    q->connect(
++        qApp,
++        &QApplication::focusChanged,
++        searchEdit,
++        [searchEdit](QWidget *oldWidget, QWidget *newWidget) {
++            if (searchEdit->text().isEmpty()) {
++                return;
++            }
++
++            const auto description = [](QWidget *w) -> QString {
++                if (!w) {
++                    return QStringLiteral("<null>");
++                }
++
++                return QStringLiteral("%1 object=%2 parent=%3")
++                    .arg(
++                        QString::fromLatin1(w->metaObject()->className()),
++                        w->objectName(),
++                        w->parentWidget()
++                            ? QString::fromLatin1(
++                                  w->parentWidget()
++                                      ->metaObject()
++                                      ->className())
++                            : QStringLiteral("<none>"));
++            };
++
++            QFile traceFile(
++                QStandardPaths::writableLocation(QStandardPaths::HomeLocation)
++                + QStringLiteral("/kfile-focus.log"));
++            if (traceFile.open(QIODevice::WriteOnly
++                               | QIODevice::Append
++                               | QIODevice::Text)) {
++
++                const QString url =
++                    searchEdit->window()
++                        ->findChild<KDirOperator *>()
++                        ? searchEdit->window()
++                              ->findChild<KDirOperator *>()
++                              ->url()
++                              .toString()
++                        : QStringLiteral("<no KDirOperator>");
++
++                const QString line =
++                    QStringLiteral(
++                        "KFILE-FOCUS: %1 --> %2 | searchHasFocus=%3 | url=%4\\n")
++                        .arg(
++                            description(oldWidget),
++                            description(newWidget),
++                            searchEdit->hasFocus()
++                                ? QStringLiteral("yes")
++                                : QStringLiteral("no"),
++                            url);
++
++                traceFile.write(line.toUtf8());
++                traceFile.flush();
++            }
++        });
 +
 +    // Programmatic filenamesearch: navigation must not make
 +    // KFileWidget::enterUrl() move focus to KDirOperator.
 +    searchEdit->setProperty("_kfilePreserveFocusOnUrlChange", true);
 +
-     searchEdit->setPlaceholderText(
-         i18nc("@info:placeholder", "Search in this folder"));
-     searchEdit->setClearButtonEnabled(true);
-@@ -1456,16 +1461,6 @@
-              */
-             m_ops->setUrl(searchUrl, false);
- 
--            // setUrl/urlEntered can disturb focus through the surrounding
--            // KFileWidget machinery. Give it straight back to search.
--            QTimer::singleShot(
--                0,
--                searchEdit,
--                [searchEdit]() {
--                    searchEdit->setFocus();
--                    searchEdit->setCursorPosition(
--                        searchEdit->text().size());
--                });
-         };
- 
-     q->connect(
-@@ -1947,7 +1942,15 @@
++    searchEdit->setPlaceholderText(
++        i18nc("@info:placeholder", "Search in this folder"));
++    searchEdit->setClearButtonEnabled(true);
++    searchEdit->setMinimumWidth(180);
++    searchEdit->setMaximumWidth(320);
++    searchEdit->setSizePolicy(
++        QSizePolicy::Preferred,
++        QSizePolicy::Fixed);
++
++    searchEdit->addAction(
++        QIcon::fromTheme(QStringLiteral("edit-find")),
++        QLineEdit::LeadingPosition);
++
++    searchEdit->setProperty("_kfileSearchBaseUrl", QVariant());
++    searchEdit->setProperty("_kfileSearchActive", false);
++    searchEdit->setProperty("_kfileSearchAppliedText", QString());
++
++    auto *searchDelay = new QTimer(searchEdit);
++    searchDelay->setSingleShot(true);
++
++    // Recursive filesystem search is much heavier than a normal
++    // filename filter.  Do not re-run it between ordinary keystrokes.
++    searchDelay->setInterval(800);
++
++    auto restoreBase =
++        [this, searchEdit, searchDelay]() {
++
++            searchDelay->stop();
++
++            const QUrl baseUrl =
++                searchEdit
++                    ->property("_kfileSearchBaseUrl")
++                    .toUrl();
++
++            searchEdit->setProperty(
++                "_kfileSearchBaseUrl",
++                QVariant());
++
++            searchEdit->setProperty(
++                "_kfileSearchActive",
++                false);
++
++            searchEdit->setProperty(
++                "_kfileSearchAppliedText",
++                QString());
++
++            if (baseUrl.isValid()
++                && !baseUrl.isEmpty()
++                && m_ops->url().scheme()
++                    == QLatin1String("filenamesearch")) {
++
++                m_ops->setUrl(baseUrl, false);
++            }
++        };
++
++    // One function owns actually applying the text currently visible
++    // in the search box.
++    auto applySearch =
++        [this, searchEdit]() {
++
++            const QString term =
++                searchEdit->text().trimmed();
++
++            if (term.isEmpty()) {
++                return;
++            }
++
++            QUrl baseUrl =
++                searchEdit
++                    ->property("_kfileSearchBaseUrl")
++                    .toUrl();
++
++            // First committed search snapshots the real directory.
++            if (!baseUrl.isValid() || baseUrl.isEmpty()) {
++
++                baseUrl = m_ops->url();
++
++                // Defensive recovery from an existing filenamesearch URL.
++                if (baseUrl.scheme()
++                    == QLatin1String("filenamesearch")) {
++
++                    const QUrlQuery oldQuery(baseUrl);
++
++                    baseUrl = QUrl(
++                        oldQuery.queryItemValue(
++                            QStringLiteral("url"),
++                            QUrl::FullyDecoded));
++                }
++
++                if (!baseUrl.isValid() || baseUrl.isEmpty()) {
++                    return;
++                }
++
++                searchEdit->setProperty(
++                    "_kfileSearchBaseUrl",
++                    baseUrl);
++            }
++
++            const QString applied =
++                searchEdit
++                    ->property("_kfileSearchAppliedText")
++                    .toString();
++
++            // Timer/Enter may both fire for the same text.
++            if (term == applied
++                && m_ops->url().scheme()
++                    == QLatin1String("filenamesearch")) {
++                return;
++            }
++
++            QUrl searchUrl;
++            searchUrl.setScheme(
++                QStringLiteral("filenamesearch"));
++            searchUrl.setPath(QStringLiteral("/"));
++
++            QUrlQuery query;
++
++            query.addQueryItem(
++                QStringLiteral("search"),
++                QRegularExpression::escape(term));
++
++            query.addQueryItem(
++                QStringLiteral("url"),
++                baseUrl.toString());
++
++            query.addQueryItem(
++                QStringLiteral("title"),
++                i18nc(
++                    "@title",
++                    "Search results for \"%1\"",
++                    term));
++
++            if (m_ops
++                    ->action(KDirOperator::ShowHiddenFiles)
++                    ->isChecked()) {
++
++                query.addQueryItem(
++                    QStringLiteral("includeHidden"),
++                    QStringLiteral("yes"));
++            }
++
++            searchUrl.setQuery(query);
++
++            // Mark THIS exact text as what the view represents.
++            searchEdit->setProperty(
++                "_kfileSearchAppliedText",
++                term);
++
++            searchEdit->setProperty(
++                "_kfileSearchActive",
++                true);
++
++            /*
++             * Do NOT call m_ops->close() here.
++             *
++             * setUrl() replaces the current KDirLister URL itself.
++             * Explicit close() was causing the visible blank/refresh
++             * between every query.
++             *
++             * false = do not put transient search URLs into history.
++             */
++            m_ops->setUrl(searchUrl, false);
++
++        };
++
++    q->connect(
++        searchDelay,
++        &QTimer::timeout,
++        q,
++        applySearch);
++
++    q->connect(
++        searchEdit,
++        &QLineEdit::textChanged,
++        q,
++        [searchEdit,
++         searchDelay,
++         restoreBase](const QString &text) {
++
++            const QString term = text.trimmed();
++
++            /*
++             * This is the important part:
++             *
++             * typing/backspacing ONLY restarts the timer.
++             * It does not touch KDirOperator at all.
++             */
++            searchDelay->stop();
++
++            if (term.isEmpty()) {
++                restoreBase();
++                return;
++            }
++
++            searchDelay->start();
++        });
++
++    // Enter = apply whatever is CURRENTLY in the box immediately.
++    q->connect(
++        searchEdit,
++        &QLineEdit::returnPressed,
++        q,
++        [searchDelay, applySearch]() {
++
++            searchDelay->stop();
++            applySearch();
++        });
++
++    // Search hidden/non-hidden again using exactly the same text.
++    q->connect(
++        m_ops->action(KDirOperator::ShowHiddenFiles),
++        &QAction::toggled,
++        q,
++        [searchEdit,
++         searchDelay,
++         applySearch](bool) {
++
++            if (searchEdit->text().trimmed().isEmpty()) {
++                return;
++            }
++
++            searchDelay->stop();
++
++            // Force reapplication even though the text didn't change.
++            searchEdit->setProperty(
++                "_kfileSearchAppliedText",
++                QString());
++
++            applySearch();
++        });
++
++    // Escape clears search and returns to its real directory.
++    auto *cancelSearchAction = new QAction(q);
++    cancelSearchAction->setShortcut(
++        QKeySequence(Qt::Key_Escape));
++    cancelSearchAction->setShortcutContext(
++        Qt::WidgetWithChildrenShortcut);
++    q->addAction(cancelSearchAction);
++
++    q->connect(
++        cancelSearchAction,
++        &QAction::triggered,
++        q,
++        [searchEdit, restoreBase]() {
++
++            if (searchEdit->text().isEmpty()) {
++                return;
++            }
++
++            const QSignalBlocker blocker(searchEdit);
++            searchEdit->clear();
++
++            restoreBase();
++            searchEdit->setFocus();
++        });
++
++    // Ctrl+F focuses/selects the search field.
++    auto *focusSearchAction = new QAction(q);
++    focusSearchAction->setShortcut(QKeySequence::Find);
++    focusSearchAction->setShortcutContext(
++        Qt::WidgetWithChildrenShortcut);
++    q->addAction(focusSearchAction);
++
++    q->connect(
++        focusSearchAction,
++        &QAction::triggered,
++        q,
++        [searchEdit]() {
++            searchEdit->setFocus();
++            searchEdit->selectAll();
++        });
++
++    m_toolbar->addWidget(searchEdit);
++    m_toolbar->addSeparator();
++
+     initZoomWidget();
+     m_toolbar->addAction(m_zoomOutAction);
+     m_toolbar->addWidget(m_iconSizeSlider);
+@@ -1648,7 +2017,15 @@
      // because when the window is showing up m_locationEdit
      // may still not have focus but it'll be the one that will have focus when the window
      // gets it and we don't want to steal its focus either
